@@ -1,0 +1,62 @@
+name: Iran Proxy Hunter
+
+on:
+  workflow_dispatch:
+
+jobs:
+  hunt:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Install tools
+        run: |
+          sudo apt update
+          sudo apt install -y curl jq parallel
+
+      - name: Collect proxy lists
+        run: |
+          echo "Collecting proxies..."
+
+          curl -s "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http" > proxies.txt
+          curl -s https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt >> proxies.txt
+          curl -s https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt >> proxies.txt
+          curl -s https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt >> proxies.txt
+
+          sort -u proxies.txt -o proxies.txt
+
+          echo "Total proxies collected:"
+          wc -l proxies.txt
+
+      - name: Test proxies and detect country
+        run: |
+
+          test_proxy() {
+            proxy=$1
+
+            ip=$(curl -x http://$proxy -m 6 -s https://api.ipify.org)
+
+            if [ -n "$ip" ]; then
+              country=$(curl -s https://ipapi.co/$ip/country_name/)
+
+              if [ "$country" = "Iran" ]; then
+                echo "$proxy | $ip | $country" >> iran_proxies.txt
+                echo "IRAN PROXY FOUND: $proxy"
+              fi
+            fi
+          }
+
+          export -f test_proxy
+
+          cat proxies.txt | parallel -j 30 test_proxy {}
+
+      - name: Show results
+        run: |
+          echo "====== IRAN PROXIES ======"
+          cat iran_proxies.txt || echo "No Iran proxy found."
+
+      - name: Save result artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: iran-proxies
+          path: iran_proxies.txt

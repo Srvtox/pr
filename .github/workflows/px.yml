@@ -46,7 +46,7 @@ jobs:
       - name: Start Cloudflare Tunnel
         run: |
           nohup cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
-          sleep 15
+        
 
           echo ""
           echo "========== PUBLIC URL =========="

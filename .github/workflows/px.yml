@@ -1,0 +1,53 @@
+name: MHRV Tunnel Node (Temporary)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  tunnel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Docker
+        run: |
+          sudo apt update
+          sudo apt install -y docker.io
+          sudo systemctl start docker
+
+      - name: Generate Secret
+        run: |
+          SECRET=$(openssl rand -hex 24)
+          echo "TUNNEL_AUTH_KEY=$SECRET" >> $GITHUB_ENV
+          echo "Tunnel Auth Key: $SECRET"
+
+      - name: Run tunnel-node
+        run: |
+          docker run -d \
+            --name mhrv-tunnel \
+            -p 8080:8080 \
+            -e TUNNEL_AUTH_KEY=${{ env.TUNNEL_AUTH_KEY }} \
+            ghcr.io/therealaleph/mhrv-tunnel-node:latest
+
+      - name: Install Cloudflare Tunnel
+        run: |
+          wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x cloudflared-linux-amd64
+          sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared
+
+      - name: Start Public Tunnel
+        run: |
+          cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
+          sleep 10
+          grep -o 'https://[-a-z0-9]*\.trycloudflare.com' tunnel.log | head -n1
+
+      - name: Keep Runner Alive
+        run: |
+          echo "Tunnel running..."
+          while true; do
+            sleep 300
+            echo "still alive"
+          done

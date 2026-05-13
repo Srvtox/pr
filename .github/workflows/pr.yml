@@ -1,62 +1,371 @@
-name: Iran Proxy Hunter
+name: GAS Tunnel + WARP Proxy
 
 on:
   workflow_dispatch:
 
 jobs:
-  hunt:
+  tunnel:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
 
     steps:
 
-      - name: Install tools
-        run: |
-          sudo apt update
-          sudo apt install -y curl jq parallel
+    - name: Checkout
+      uses: actions/checkout@v4
 
-      - name: Collect proxy lists
-        run: |
-          echo "Collecting proxies..."
+    ##################################################
+    # BASE
+    ##################################################
 
-          curl -s "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http" > proxies.txt
-          curl -s https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt >> proxies.txt
-          curl -s https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt >> proxies.txt
-          curl -s https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt >> proxies.txt
+    - name: Install base packages
+      run: |
+        sudo apt update
+        sudo apt install -y \
+          curl \
+          wget \
+          tar \
+          python3-pip \
+          net-tools
 
-          sort -u proxies.txt -o proxies.txt
+    ##################################################
+    # NODE
+    ##################################################
 
-          echo "Total proxies collected:"
-          wc -l proxies.txt
+    - name: Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: 20
 
-      - name: Test proxies and detect country
-        run: |
+    - name: Install Node dependencies
+      run: |
+        npm init -y
+        npm install express cors body-parser
 
-          test_proxy() {
-            proxy=$1
+    ##################################################
+    # CREATE GAS RELAY SERVER
+    ##################################################
 
-            ip=$(curl -x http://$proxy -m 6 -s https://api.ipify.org)
+    - name: Create relay server
+      run: |
+        cat << 'EOF' > server.js
 
-            if [ -n "$ip" ]; then
-              country=$(curl -s https://ipapi.co/$ip/country_name/)
+        const express = require('express')
+        const cors = require('cors')
+        const bodyParser = require('body-parser')
 
-              if [ "$country" = "Iran" ]; then
-                echo "$proxy | $ip | $country" >> iran_proxies.txt
-                echo "IRAN PROXY FOUND: $proxy"
-              fi
-            fi
+        const app = express()
+
+        const AUTH = process.env.TUNNEL_KEY || "change_me"
+
+        app.use(cors())
+        app.use(bodyParser.json({ limit: "20mb" }))
+
+        app.get("/", (req, res) => {
+          res.send("🚀 GAS Tunnel Alive")
+        })
+
+        app.post("/relay", async (req, res) => {
+
+          if (req.headers["x-auth"] !== AUTH) {
+            return res.status(403).json({
+              error: "forbidden"
+            })
           }
 
-          export -f test_proxy
+          try {
 
-          cat proxies.txt | parallel -j 30 test_proxy {}
+            const r = req.body
 
-      - name: Show results
-        run: |
-          echo "====== IRAN PROXIES ======"
-          cat iran_proxies.txt || echo "No Iran proxy found."
+            const response = await fetch(r.url, {
+              method: r.method || "GET",
+              headers: r.headers || {},
+              body: r.body
+            })
 
-      - name: Save result artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: iran-proxies
-          path: iran_proxies.txt
+            const buffer = Buffer.from(
+              await response.arrayBuffer()
+            )
+
+            res.json({
+              ok: true,
+              status: response.status,
+              headers: Object.fromEntries(
+                response.headers.entries()
+              ),
+              body: buffer.toString("base64")
+            })
+
+          } catch (e) {
+
+            res.status(500).json({
+              ok: false,
+              error: e.toString()
+            })
+
+          }
+
+        })
+
+        const PORT = process.env.PORT || 3000
+
+        app.listen(PORT, () => {
+          console.log("Tunnel server running on port " + PORT)
+        })
+
+        EOF
+
+    ##################################################
+    # START NODE SERVER
+    ##################################################
+
+    - name: Start relay server
+      env:
+        TUNNEL_KEY: ${{ secrets.TUNNEL_KEY }}
+      run: |
+        nohup node server.js > server.log 2>&1 &
+        sleep 5
+        cat server.log
+
+    ##################################################
+    # INSTALL WGCF
+    ##################################################
+
+    - name: Install WGCF
+      run: |
+        wget -q https://github.com/ViRb3/wgcf/releases/latest/download/wgcf_2.2.30_linux_amd64 -O wgcf
+        chmod +x wgcf
+        sudo mv wgcf /usr/local/bin/
+
+        yes | wgcf register
+        wgcf generate
+
+    ##################################################
+    # INSTALL WIREPROXY
+    ##################################################
+
+    - name: Install WireProxy
+      run: |
+        wget -q https://github.com/pufferffish/wireproxy/releases/latest/download/wireproxy_linux_amd64.tar.gz
+
+        tar -xzf wireproxy_linux_amd64.tar.gz
+
+        chmod +x wireproxy
+
+        sudo mv wireproxy /usr/local/bin/
+
+    ##################################################
+    # BUILD WARP CONFIG
+    ##################################################
+
+    - name: Build WireProxy config
+      run: |
+        mkdir -p warp
+
+        PRIVATE=$(grep PrivateKey wgcf-profile.conf | awk '{print $3}')
+        ADDRESS=$(grep Address wgcf-profile.conf | awk '{print $3}')
+        DNS=$(grep DNS wgcf-profile.conf | awk '{print $3}')
+        PUBLIC=$(grep PublicKey wgcf-profile.conf | awk '{print $3}')
+        ENDPOINT=$(grep Endpoint wgcf-profile.conf | awk '{print $3}')
+
+        cat > warp/config.ini <<EOF
+        [Interface]
+        PrivateKey = $PRIVATE
+        Address = $ADDRESS
+        DNS = $DNS
+
+        [Peer]
+        PublicKey = $PUBLIC
+        Endpoint = $ENDPOINT
+
+        [Socks5]
+        BindAddress = 127.0.0.1:1080
+        EOF
+
+    ##################################################
+    # START WARP
+    ##################################################
+
+    - name: Start WARP SOCKS5
+      run: |
+        nohup wireproxy -c warp/config.ini > warp.log 2>&1 &
+        sleep 10
+
+        echo "==== WARP SOCKS ===="
+        netstat -tulpn | grep 1080 || true
+
+    ##################################################
+    # TEST WARP
+    ##################################################
+
+    - name: Test WARP
+      run: |
+        echo "==== WARP IP ===="
+        curl --socks5 127.0.0.1:1080 https://ipinfo.io
+
+    ##################################################
+    # PYTHON HTTP BRIDGE
+    ##################################################
+
+    - name: Install Python packages
+      run: |
+        pip3 install flask requests pysocks gunicorn urllib3
+
+    - name: Create HTTP bridge
+      run: |
+        cat > proxy.py <<'PY'
+
+        from flask import Flask, request, Response, stream_with_context
+        import requests
+        import urllib3
+
+        urllib3.disable_warnings(
+            urllib3.exceptions.InsecureRequestWarning
+        )
+
+        app = Flask(__name__)
+
+        SOCKS = "socks5h://127.0.0.1:1080"
+
+        @app.route("/", methods=[
+            "GET",
+            "POST",
+            "PUT",
+            "DELETE",
+            "PATCH"
+        ])
+        def proxy():
+
+            url = request.args.get("url")
+
+            if not url:
+                return "missing url", 400
+
+            headers = {
+                k: v
+                for k, v in request.headers
+                if k.lower() != "host"
+            }
+
+            try:
+
+                r = requests.request(
+                    method=request.method,
+                    url=url,
+                    headers=headers,
+                    data=request.get_data(),
+                    cookies=request.cookies,
+                    proxies={
+                        "http": SOCKS,
+                        "https": SOCKS
+                    },
+                    allow_redirects=True,
+                    stream=True,
+                    timeout=30,
+                    verify=False
+                )
+
+                excluded = [
+                    "content-encoding",
+                    "transfer-encoding",
+                    "connection",
+                    "keep-alive",
+                    "proxy-authenticate",
+                    "proxy-authorization"
+                ]
+
+                response_headers = [
+                    (k, v)
+                    for k, v in r.raw.headers.items()
+                    if k.lower() not in excluded
+                ]
+
+                def generate():
+                    try:
+                        for chunk in r.iter_content(
+                            chunk_size=16384
+                        ):
+                            if chunk:
+                                yield chunk
+                    finally:
+                        r.close()
+
+                return Response(
+                    stream_with_context(generate()),
+                    status=r.status_code,
+                    headers=response_headers
+                )
+
+            except Exception as e:
+                return f"proxy error: {str(e)}", 500
+
+        if __name__ == "__main__":
+            app.run(
+                host="0.0.0.0",
+                port=8080,
+                threaded=True
+            )
+
+        PY
+
+    ##################################################
+    # START PYTHON BRIDGE
+    ##################################################
+
+    - name: Start HTTP bridge
+      run: |
+        nohup gunicorn \
+          -w 4 \
+          -b 0.0.0.0:8080 \
+          proxy:app \
+          > proxy.log 2>&1 &
+
+        sleep 10
+
+        echo "==== HTTP BRIDGE ===="
+        netstat -tulpn | grep 8080 || true
+
+    ##################################################
+    # INSTALL CLOUDFLARED
+    ##################################################
+
+    - name: Install Cloudflared
+      run: |
+        wget -q \
+          https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+          -O cloudflared
+
+        chmod +x cloudflared
+
+    ##################################################
+    # START TUNNEL
+    ##################################################
+
+    - name: Start Cloudflare Tunnel
+      run: |
+        nohup ./cloudflared tunnel \
+          --url http://127.0.0.1:8080 \
+          --no-autoupdate \
+          > tunnel.log 2>&1 &
+
+        sleep 15
+
+        echo "================================="
+        echo "✅ CLOUDFLARE TUNNEL URL"
+        grep -o 'https://[-0-9a-z]*\.trycloudflare\.com' tunnel.log | head -n 1
+        echo "================================="
+
+        cat tunnel.log
+
+    ##################################################
+    # KEEP RUNNER ALIVE
+    ##################################################
+
+    - name: Keep runner alive
+      run: |
+        echo "🚀 Tunnel alive for 6 hours"
+
+        for i in $(seq 1 360)
+        do
+          curl --socks5 127.0.0.1:1080 https://ipinfo.io/ip || true
+          sleep 60
+        done

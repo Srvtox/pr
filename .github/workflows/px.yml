@@ -1,4 +1,4 @@
-name: MHRV Tunnel Node (Temporary)
+name: MHRV Tunnel Node
 
 on:
   workflow_dispatch:
@@ -12,38 +12,52 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Check Docker
-        run: docker --version
-
       - name: Generate Secret
         run: |
           SECRET=$(openssl rand -hex 24)
           echo "TUNNEL_AUTH_KEY=$SECRET" >> $GITHUB_ENV
-          echo "Tunnel Auth Key: $SECRET"
+          echo ""
+          echo "=================================="
+          echo "TUNNEL_AUTH_KEY: $SECRET"
+          echo "=================================="
 
       - name: Run tunnel-node
         run: |
           docker run -d \
             --name mhrv-tunnel \
+            --restart unless-stopped \
             -p 8080:8080 \
             -e TUNNEL_AUTH_KEY=${{ env.TUNNEL_AUTH_KEY }} \
             ghcr.io/therealaleph/mhrv-tunnel-node:latest
 
-      - name: Install Cloudflare Tunnel
+      - name: Wait for server
+        run: sleep 5
+
+      - name: Health Check
         run: |
-          wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          curl http://localhost:8080/health
+
+      - name: Install cloudflared
+        run: |
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
           chmod +x cloudflared-linux-amd64
           sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared
 
-      - name: Start Public Tunnel
+      - name: Start Cloudflare Tunnel
         run: |
-          cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
-          sleep 10
+          nohup cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
+          sleep 15
+
+          echo ""
+          echo "========== PUBLIC URL =========="
+
           grep -o 'https://[-a-z0-9]*\.trycloudflare\.com' tunnel.log | head -n1
 
-      - name: Keep Runner Alive
+          echo "================================"
+
+      - name: Keep Alive
         run: |
           while true; do
+            echo "Tunnel alive: $(date)"
             sleep 300
-            echo "runner alive"
           done

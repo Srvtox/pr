@@ -9,160 +9,128 @@ jobs:
 
     steps:
 
-      ########################################################
-      # NODE
-      ########################################################
+########################################################
+# NODE
+########################################################
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      ########################################################
-      # CREATE BACKEND
-      ########################################################
+########################################################
+# CREATE BACKEND
+########################################################
 
       - name: Create backend server
         run: |
 
           cat > server.js << 'EOF'
 
-          const http = require("http");
-          const net = require("net");
+          const http = require("http")
+          const net = require("net")
+          const crypto = require("crypto")
 
-          //////////////////////////////////////////////////////
-          // SESSION STORE
-          //////////////////////////////////////////////////////
+          ////////////////////////////////////////////////////
+          // STORES
+          ////////////////////////////////////////////////////
 
-          const sessions = new Map();
+          const rtSessions = new Map()
+          const wsSessions = new Map()
 
-          //////////////////////////////////////////////////////
-          // JSON RESPONSE
-          //////////////////////////////////////////////////////
+          ////////////////////////////////////////////////////
+          // UTIL
+          ////////////////////////////////////////////////////
 
           function json(res,obj){
 
-            if(res.writableEnded){
-              return;
-            }
+            if(res.writableEnded) return
 
             res.writeHead(200,{
               "Content-Type":"application/json",
               "Access-Control-Allow-Origin":"*",
               "Cache-Control":"no-store"
-            });
+            })
 
-            res.end(JSON.stringify(obj));
+            res.end(JSON.stringify(obj))
           }
 
-          //////////////////////////////////////////////////////
-          // VALIDATE HOST
-          //////////////////////////////////////////////////////
+          function sid(){
+            return crypto.randomBytes(12).toString("hex")
+          }
+
+          ////////////////////////////////////////////////////
+          // HOST FILTER
+          ////////////////////////////////////////////////////
 
           function validHost(host){
 
-            if(!host){
-              return false;
-            }
+            if(!host) return false
 
-            const h = String(host).toLowerCase();
+            const h = String(host).toLowerCase()
 
             if(
               h === "localhost" ||
               h.startsWith("127.") ||
               h.startsWith("10.") ||
               h.startsWith("192.168.") ||
-              h.startsWith("172.16.") ||
-              h.startsWith("172.17.") ||
-              h.startsWith("172.18.") ||
-              h.startsWith("172.19.") ||
-              h.startsWith("172.20.") ||
-              h.startsWith("172.21.") ||
-              h.startsWith("172.22.") ||
-              h.startsWith("172.23.") ||
-              h.startsWith("172.24.") ||
-              h.startsWith("172.25.") ||
-              h.startsWith("172.26.") ||
-              h.startsWith("172.27.") ||
-              h.startsWith("172.28.") ||
-              h.startsWith("172.29.") ||
-              h.startsWith("172.30.") ||
-              h.startsWith("172.31.")
+              h.startsWith("172.")
             ){
-              return false;
+              return false
             }
 
-            return true;
+            return true
           }
 
-          //////////////////////////////////////////////////////
+          ////////////////////////////////////////////////////
           // SERVER
-          //////////////////////////////////////////////////////
+          ////////////////////////////////////////////////////
 
           const server = http.createServer((req,res)=>{
 
-            ////////////////////////////////////////////////////
-            // HEALTHCHECK
-            ////////////////////////////////////////////////////
-
             if(req.method==="GET"){
-
               return json(res,{
                 ok:true,
-                ping:"pong"
-              });
-
+                service:"gas-hybrid-backend",
+                time:Date.now()
+              })
             }
 
-            ////////////////////////////////////////////////////
-            // BODY
-            ////////////////////////////////////////////////////
-
-            let body="";
+            let body=""
 
             req.on("data",(d)=>{
 
-              body += d;
+              body += d
 
-              if(body.length > 10 * 1024 * 1024){
-
-                req.destroy();
-
+              if(body.length > 20 * 1024 * 1024){
+                req.destroy()
               }
 
-            });
-
-            ////////////////////////////////////////////////////
-            // END
-            ////////////////////////////////////////////////////
+            })
 
             req.on("end",()=>{
 
               try{
 
-                const j =
-                  JSON.parse(body || "{}");
+                const j = JSON.parse(body||"{}")
 
                 //////////////////////////////////////////////////
-                // RT OPEN
+                // REALTIME OPEN
                 //////////////////////////////////////////////////
 
                 if(j.op==="rt_open"){
 
-                  const sid =
-                    Math.random()
-                    .toString(36)
-                    .slice(2);
+                  const id = sid()
 
-                  sessions.set(sid,{
+                  rtSessions.set(id,{
                     q:[],
                     ts:Date.now()
-                  });
+                  })
 
                   return json(res,{
                     ok:true,
-                    sid
-                  });
+                    sid:id
+                  })
 
                 }
 
@@ -172,25 +140,16 @@ jobs:
 
                 if(j.op==="rt_push"){
 
-                  const s =
-                    sessions.get(j.sid);
+                  const s = rtSessions.get(j.sid)
 
                   if(!s){
-
-                    return json(res,{
-                      ok:false,
-                      error:"bad_sid"
-                    });
-
+                    return json(res,{ok:false})
                   }
 
-                  s.ts = Date.now();
+                  s.q.push(j.d)
+                  s.ts=Date.now()
 
-                  s.q.push(j.d);
-
-                  return json(res,{
-                    ok:true
-                  });
+                  return json(res,{ok:true})
 
                 }
 
@@ -200,27 +159,20 @@ jobs:
 
                 if(j.op==="rt_pull"){
 
-                  const s =
-                    sessions.get(j.sid);
+                  const s = rtSessions.get(j.sid)
 
                   if(!s){
-
-                    return json(res,{
-                      ok:false,
-                      error:"bad_sid"
-                    });
-
+                    return json(res,{ok:false})
                   }
 
-                  s.ts = Date.now();
+                  const d = s.q.shift() || null
 
-                  const data =
-                    s.q.shift();
+                  s.ts=Date.now()
 
                   return json(res,{
                     ok:true,
-                    d:data || null
-                  });
+                    d
+                  })
 
                 }
 
@@ -230,229 +182,294 @@ jobs:
 
                 if(j.op==="rt_close"){
 
-                  sessions.delete(j.sid);
+                  rtSessions.delete(j.sid)
 
-                  return json(res,{
-                    ok:true
-                  });
+                  return json(res,{ok:true})
 
                 }
 
                 //////////////////////////////////////////////////
-                // REAL TCP TUNNEL
+                // WS OPEN
+                //////////////////////////////////////////////////
+
+                if(j.op==="ws_open"){
+
+                  const socket = new net.Socket()
+
+                  socket.connect(80,new URL(j.url).hostname)
+
+                  const id = sid()
+
+                  wsSessions.set(id,{
+                    socket,
+                    q:[],
+                    ts:Date.now()
+                  })
+
+                  socket.on("data",(d)=>{
+
+                    const s = wsSessions.get(id)
+
+                    if(s){
+                      s.q.push(
+                        d.toString("base64")
+                      )
+                    }
+
+                  })
+
+                  socket.on("close",()=>{
+                    wsSessions.delete(id)
+                  })
+
+                  return json(res,{
+                    ok:true,
+                    sid:id
+                  })
+
+                }
+
+                //////////////////////////////////////////////////
+                // WS PUSH
+                //////////////////////////////////////////////////
+
+                if(j.op==="ws_push"){
+
+                  const s = wsSessions.get(j.sid)
+
+                  if(!s){
+                    return json(res,{ok:false})
+                  }
+
+                  s.socket.write(
+                    Buffer.from(j.frame,"base64")
+                  )
+
+                  return json(res,{ok:true})
+
+                }
+
+                //////////////////////////////////////////////////
+                // WS PULL
+                //////////////////////////////////////////////////
+
+                if(j.op==="ws_pull"){
+
+                  const s = wsSessions.get(j.sid)
+
+                  if(!s){
+                    return json(res,{ok:false})
+                  }
+
+                  const frame = s.q.shift() || null
+
+                  return json(res,{
+                    ok:true,
+                    frame
+                  })
+
+                }
+
+                //////////////////////////////////////////////////
+                // WS CLOSE
+                //////////////////////////////////////////////////
+
+                if(j.op==="ws_close"){
+
+                  const s = wsSessions.get(j.sid)
+
+                  if(s){
+                    s.socket.destroy()
+                  }
+
+                  wsSessions.delete(j.sid)
+
+                  return json(res,{ok:true})
+
+                }
+
+                //////////////////////////////////////////////////
+                // TCP TUNNEL
                 //////////////////////////////////////////////////
 
                 if(j.op==="tunnel"){
 
-                  //////////////////////////////////////////////////
-                  // VALIDATE
-                  //////////////////////////////////////////////////
-
-                  if(
-                    !j.h ||
-                    !j.p
-                  ){
-
-                    return json(res,{
-                      ok:false,
-                      error:"bad_target"
-                    });
-
-                  }
-
                   if(!validHost(j.h)){
-
                     return json(res,{
                       ok:false,
                       error:"blocked_host"
-                    });
-
+                    })
                   }
-
-                  //////////////////////////////////////////////////
-                  // SOCKET
-                  //////////////////////////////////////////////////
 
                   const socket =
                     net.connect(
                       Number(j.p),
                       j.h
-                    );
+                    )
 
-                  socket.setTimeout(15000);
+                  socket.setTimeout(20000)
 
-                  const chunks = [];
-
-                  //////////////////////////////////////////////////
-                  // CONNECT
-                  //////////////////////////////////////////////////
+                  const chunks=[]
 
                   socket.on("connect",()=>{
 
-                    try{
+                    if(j.d){
 
-                      if(j.d){
-
-                        socket.write(
-                          Buffer.from(
-                            j.d,
-                            "base64"
-                          )
-                        );
-
-                      }
-
-                    }catch(e){
-
-                      socket.destroy();
-
-                      return json(res,{
-                        ok:false,
-                        error:String(e)
-                      });
+                      socket.write(
+                        Buffer.from(j.d,"base64")
+                      )
 
                     }
 
-                  });
-
-                  //////////////////////////////////////////////////
-                  // DATA
-                  //////////////////////////////////////////////////
+                  })
 
                   socket.on("data",(d)=>{
-
-                    chunks.push(d);
-
-                  });
-
-                  //////////////////////////////////////////////////
-                  // END
-                  //////////////////////////////////////////////////
+                    chunks.push(d)
+                  })
 
                   socket.on("end",()=>{
 
                     const buf =
-                      Buffer.concat(chunks);
+                      Buffer.concat(chunks)
 
                     return json(res,{
                       ok:true,
                       d:buf.toString("base64")
-                    });
+                    })
 
-                  });
-
-                  //////////////////////////////////////////////////
-                  // TIMEOUT
-                  //////////////////////////////////////////////////
+                  })
 
                   socket.on("timeout",()=>{
 
-                    socket.destroy();
+                    socket.destroy()
 
                     return json(res,{
                       ok:false,
                       error:"timeout"
-                    });
+                    })
 
-                  });
-
-                  //////////////////////////////////////////////////
-                  // ERROR
-                  //////////////////////////////////////////////////
+                  })
 
                   socket.on("error",(e)=>{
 
                     return json(res,{
                       ok:false,
                       error:String(e)
-                    });
+                    })
 
-                  });
+                  })
 
-                  return;
+                  return
                 }
 
                 //////////////////////////////////////////////////
-                // UNKNOWN
+                // BATCH
                 //////////////////////////////////////////////////
+
+                if(j.op==="batch"){
+
+                  const out=[]
+
+                  for(const op of j.ops||[]){
+
+                    out.push({
+                      ok:false,
+                      error:"not_implemented"
+                    })
+
+                  }
+
+                  return json(res,{
+                    ok:true,
+                    results:out
+                  })
+
+                }
 
                 return json(res,{
                   ok:false,
                   error:"unknown_op"
-                });
+                })
 
               }catch(err){
 
                 return json(res,{
                   ok:false,
                   error:String(err)
-                });
+                })
 
               }
 
-            });
+            })
 
-          });
+          })
 
-          //////////////////////////////////////////////////////
+          ////////////////////////////////////////////////////
           // TIMEOUTS
-          //////////////////////////////////////////////////////
+          ////////////////////////////////////////////////////
 
-          server.keepAliveTimeout = 65000;
-          server.headersTimeout = 70000;
+          server.keepAliveTimeout = 65000
+          server.headersTimeout = 70000
 
-          //////////////////////////////////////////////////////
+          ////////////////////////////////////////////////////
           // START
-          //////////////////////////////////////////////////////
+          ////////////////////////////////////////////////////
 
           server.listen(8080,"0.0.0.0",()=>{
 
-            console.log("REAL TCP BACKEND READY");
+            console.log("HYBRID BACKEND READY")
 
-          });
+          })
 
-          //////////////////////////////////////////////////////
-          // SESSION CLEANER
-          //////////////////////////////////////////////////////
+          ////////////////////////////////////////////////////
+          // SESSION GC
+          ////////////////////////////////////////////////////
 
           setInterval(()=>{
 
-            const now = Date.now();
+            const now = Date.now()
 
-            for(const [sid,s] of sessions){
+            for(const [k,v] of rtSessions){
 
-              if(now - s.ts > 1000 * 60 * 10){
-
-                sessions.delete(sid);
-
+              if(now - v.ts > 600000){
+                rtSessions.delete(k)
               }
 
             }
 
-          },60000);
+            for(const [k,v] of wsSessions){
+
+              if(now - v.ts > 600000){
+                v.socket.destroy()
+                wsSessions.delete(k)
+              }
+
+            }
+
+          },60000)
 
           EOF
 
-      ########################################################
-      # START BACKEND
-      ########################################################
+########################################################
+# START BACKEND
+########################################################
 
       - name: Start backend
         run: |
           nohup node server.js > backend.log 2>&1 &
 
-      ########################################################
-      # INSTALL SSH
-      ########################################################
+########################################################
+# SSH CLIENT
+########################################################
 
       - name: Install SSH
         run: |
           sudo apt update
           sudo apt install -y openssh-client
 
-      ########################################################
-      # START LOCALHOST.RUN
-      ########################################################
+########################################################
+# START TUNNEL
+########################################################
 
       - name: Start localhost.run tunnel
         run: |
@@ -461,7 +478,6 @@ jobs:
             -o ServerAliveInterval=30 \
             -o ServerAliveCountMax=3 \
             -o StrictHostKeyChecking=no \
-            -o ExitOnForwardFailure=yes \
             -R 80:localhost:8080 \
             nokey@localhost.run \
             > tunnel.log 2>&1 &
@@ -475,14 +491,13 @@ jobs:
             if [ ! -z "$URL" ]; then
 
               echo ""
-              echo "=================================="
+              echo "==============================="
               echo "PUBLIC URL:"
               echo "$URL"
-              echo "=================================="
+              echo "==============================="
               echo ""
 
               echo "$URL" > public_url.txt
-
               break
 
             fi
@@ -493,25 +508,14 @@ jobs:
 
           cat tunnel.log
 
-      ########################################################
-      # SHOW URL
-      ########################################################
-
-      - name: Show Public URL
-        run: |
-          cat public_url.txt || true
-
-      ########################################################
-      # KEEP ALIVE
-      ########################################################
+########################################################
+# KEEP RUNNER ALIVE
+########################################################
 
       - name: Keep Runner Alive
         run: |
 
           while true; do
-
             echo "alive $(date)"
-
             sleep 60
-
           done

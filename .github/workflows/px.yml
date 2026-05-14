@@ -1,4 +1,4 @@
-name: MHRV Tunnel Node
+name: GAS Hybrid Tunnel
 
 on:
   workflow_dispatch:
@@ -6,52 +6,261 @@ on:
 jobs:
   tunnel:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
 
-      - name: Generate Secret
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      ########################################################
+      # BACKEND SERVER
+      ########################################################
+
+      - name: Create backend server
         run: |
-          SECRET=$(openssl rand -hex 24)
-          echo "TUNNEL_AUTH_KEY=$SECRET" >> $GITHUB_ENV
-          echo ""
-          echo "=================================="
-          echo "TUNNEL_AUTH_KEY: $SECRET"
-          echo "=================================="
 
-      - name: Run tunnel-node
+          cat > server.js << 'EOF'
+
+          const http = require("http");
+
+          const sessions = new Map();
+
+          function json(res,obj){
+            res.writeHead(200,{
+              "Content-Type":"application/json",
+              "Access-Control-Allow-Origin":"*",
+              "Cache-Control":"no-store"
+            });
+
+            res.end(JSON.stringify(obj));
+          }
+
+          const server = http.createServer((req,res)=>{
+
+            if(req.method==="GET"){
+              return json(res,{
+                ok:true,
+                ping:"pong"
+              });
+            }
+
+            let body="";
+
+            req.on("data",d=>{
+
+              body+=d;
+
+              if(body.length>10*1024*1024){
+                req.destroy();
+              }
+
+            });
+
+            req.on("end",()=>{
+
+              try{
+
+                const j = JSON.parse(body || "{}");
+
+                //////////////////////////////////////////////////
+                // SIMPLE RT ENGINE
+                //////////////////////////////////////////////////
+
+                if(j.op==="rt_open"){
+
+                  const sid =
+                    Math.random()
+                    .toString(36)
+                    .slice(2);
+
+                  sessions.set(sid,{
+                    q:[]
+                  });
+
+                  return json(res,{
+                    ok:true,
+                    sid
+                  });
+                }
+
+                if(j.op==="rt_push"){
+
+                  const s=sessions.get(j.sid);
+
+                  if(!s){
+                    return json(res,{
+                      ok:false,
+                      error:"bad_sid"
+                    });
+                  }
+
+                  s.q.push(j.d);
+
+                  return json(res,{
+                    ok:true
+                  });
+                }
+
+                if(j.op==="rt_pull"){
+
+                  const s=sessions.get(j.sid);
+
+                  if(!s){
+                    return json(res,{
+                      ok:false,
+                      error:"bad_sid"
+                    });
+                  }
+
+                  const data=s.q.shift();
+
+                  return json(res,{
+                    ok:true,
+                    d:data||null
+                  });
+                }
+
+                if(j.op==="rt_close"){
+
+                  sessions.delete(j.sid);
+
+                  return json(res,{
+                    ok:true
+                  });
+                }
+
+                //////////////////////////////////////////////////
+                // BASIC TUNNEL MOCK
+                //////////////////////////////////////////////////
+
+                if(
+                  j.op==="tunnel" ||
+                  j.op==="batch"
+                ){
+                  return json(res,{
+                    ok:true,
+                    echo:j
+                  });
+                }
+
+                return json(res,{
+                  ok:false,
+                  error:"unknown_op"
+                });
+
+              }catch(err){
+
+                return json(res,{
+                  ok:false,
+                  error:String(err)
+                });
+              }
+
+            });
+
+          });
+
+          server.keepAliveTimeout = 65000;
+          server.headersTimeout = 70000;
+
+          server.listen(8080,"0.0.0.0",()=>{
+
+            console.log("backend listening :8080");
+
+          });
+
+          //////////////////////////////////////////////////////
+          // MEMORY CLEANER
+          //////////////////////////////////////////////////////
+
+          setInterval(()=>{
+
+            if(global.gc){
+              global.gc();
+            }
+
+          },30000);
+
+          EOF
+
+      ########################################################
+      # START SERVER
+      ########################################################
+
+      - name: Start backend
         run: |
-          docker run -d \
-            --name mhrv-tunnel \
-            --restart unless-stopped \
-            -p 8080:8080 \
-            -e TUNNEL_AUTH_KEY=${{ env.TUNNEL_AUTH_KEY }} \
-            ghcr.io/therealaleph/mhrv-tunnel-node:latest
+          node --expose-gc server.js > backend.log 2>&1 &
 
-      - name: Wait for server
-        run: sleep 5
+      ########################################################
+      # SSH CLIENT
+      ########################################################
 
-      - name: Health Check
+      - name: Install SSH
         run: |
-          curl http://localhost:8080/health
+          sudo apt update
+          sudo apt install -y openssh-client
 
-      - name: Install cloudflared
-        run: |
-          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-          chmod +x cloudflared-linux-amd64
-          sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared
+      ########################################################
+      # START LOCALHOST.RUN
+      ########################################################
 
-      - name: Start Public Tunnel
+      - name: Start localhost.run tunnel
         run: |
-          cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
-          sleep 10
-          grep -o 'https://[-a-z0-9]*\.trycloudflare\.com' tunnel.log | head -n1
+
+          nohup ssh \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=3 \
+            -o StrictHostKeyChecking=no \
+            -o ExitOnForwardFailure=yes \
+            -R 80:localhost:8080 \
+            nokey@localhost.run \
+            > tunnel.log 2>&1 &
+
+          echo "waiting tunnel..."
+
+          for i in {1..30}; do
+
+            URL=$(grep -Eo 'https://[a-zA-Z0-9.-]+' tunnel.log | head -n 1)
+
+            if [ ! -z "$URL" ]; then
+              echo ""
+              echo "======================================"
+              echo "PUBLIC URL:"
+              echo "$URL"
+              echo "======================================"
+              echo ""
+
+              echo "$URL" > public_url.txt
+
+              break
+            fi
+
+            sleep 2
+          done
+
+          cat tunnel.log
+
+      ########################################################
+      # SHOW URL
+      ########################################################
+
+      - name: Show Public URL
+        run: |
+          cat public_url.txt || true
+
+      ########################################################
+      # KEEP RUNNER ALIVE
+      ########################################################
 
       - name: Keep Alive
         run: |
+
           while true; do
-            echo "Tunnel alive: $(date)"
-            sleep 300
+
+            echo "still alive $(date)"
+
+            sleep 60
+
           done

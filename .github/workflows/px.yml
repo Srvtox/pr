@@ -9,13 +9,17 @@ jobs:
 
     steps:
 
+      ########################################################
+      # NODE
+      ########################################################
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
       ########################################################
-      # BACKEND SERVER
+      # CREATE BACKEND
       ########################################################
 
       - name: Create backend server
@@ -24,10 +28,24 @@ jobs:
           cat > server.js << 'EOF'
 
           const http = require("http");
+          const net = require("net");
+
+          //////////////////////////////////////////////////////
+          // SESSION STORE
+          //////////////////////////////////////////////////////
 
           const sessions = new Map();
 
+          //////////////////////////////////////////////////////
+          // JSON RESPONSE
+          //////////////////////////////////////////////////////
+
           function json(res,obj){
+
+            if(res.writableEnded){
+              return;
+            }
+
             res.writeHead(200,{
               "Content-Type":"application/json",
               "Access-Control-Allow-Origin":"*",
@@ -37,35 +55,96 @@ jobs:
             res.end(JSON.stringify(obj));
           }
 
+          //////////////////////////////////////////////////////
+          // VALIDATE HOST
+          //////////////////////////////////////////////////////
+
+          function validHost(host){
+
+            if(!host){
+              return false;
+            }
+
+            const h = String(host).toLowerCase();
+
+            if(
+              h === "localhost" ||
+              h.startsWith("127.") ||
+              h.startsWith("10.") ||
+              h.startsWith("192.168.") ||
+              h.startsWith("172.16.") ||
+              h.startsWith("172.17.") ||
+              h.startsWith("172.18.") ||
+              h.startsWith("172.19.") ||
+              h.startsWith("172.20.") ||
+              h.startsWith("172.21.") ||
+              h.startsWith("172.22.") ||
+              h.startsWith("172.23.") ||
+              h.startsWith("172.24.") ||
+              h.startsWith("172.25.") ||
+              h.startsWith("172.26.") ||
+              h.startsWith("172.27.") ||
+              h.startsWith("172.28.") ||
+              h.startsWith("172.29.") ||
+              h.startsWith("172.30.") ||
+              h.startsWith("172.31.")
+            ){
+              return false;
+            }
+
+            return true;
+          }
+
+          //////////////////////////////////////////////////////
+          // SERVER
+          //////////////////////////////////////////////////////
+
           const server = http.createServer((req,res)=>{
 
+            ////////////////////////////////////////////////////
+            // HEALTHCHECK
+            ////////////////////////////////////////////////////
+
             if(req.method==="GET"){
+
               return json(res,{
                 ok:true,
                 ping:"pong"
               });
+
             }
+
+            ////////////////////////////////////////////////////
+            // BODY
+            ////////////////////////////////////////////////////
 
             let body="";
 
-            req.on("data",d=>{
+            req.on("data",(d)=>{
 
-              body+=d;
+              body += d;
 
-              if(body.length>10*1024*1024){
+              if(body.length > 10 * 1024 * 1024){
+
                 req.destroy();
+
               }
 
             });
+
+            ////////////////////////////////////////////////////
+            // END
+            ////////////////////////////////////////////////////
 
             req.on("end",()=>{
 
               try{
 
-                const j = JSON.parse(body || "{}");
+                const j =
+                  JSON.parse(body || "{}");
 
                 //////////////////////////////////////////////////
-                // SIMPLE RT ENGINE
+                // RT OPEN
                 //////////////////////////////////////////////////
 
                 if(j.op==="rt_open"){
@@ -76,51 +155,78 @@ jobs:
                     .slice(2);
 
                   sessions.set(sid,{
-                    q:[]
+                    q:[],
+                    ts:Date.now()
                   });
 
                   return json(res,{
                     ok:true,
                     sid
                   });
+
                 }
+
+                //////////////////////////////////////////////////
+                // RT PUSH
+                //////////////////////////////////////////////////
 
                 if(j.op==="rt_push"){
 
-                  const s=sessions.get(j.sid);
+                  const s =
+                    sessions.get(j.sid);
 
                   if(!s){
+
                     return json(res,{
                       ok:false,
                       error:"bad_sid"
                     });
+
                   }
+
+                  s.ts = Date.now();
 
                   s.q.push(j.d);
 
                   return json(res,{
                     ok:true
                   });
+
                 }
+
+                //////////////////////////////////////////////////
+                // RT PULL
+                //////////////////////////////////////////////////
 
                 if(j.op==="rt_pull"){
 
-                  const s=sessions.get(j.sid);
+                  const s =
+                    sessions.get(j.sid);
 
                   if(!s){
+
                     return json(res,{
                       ok:false,
                       error:"bad_sid"
                     });
+
                   }
 
-                  const data=s.q.shift();
+                  s.ts = Date.now();
+
+                  const data =
+                    s.q.shift();
 
                   return json(res,{
                     ok:true,
-                    d:data||null
+                    d:data || null
                   });
+
                 }
+
+                //////////////////////////////////////////////////
+                // RT CLOSE
+                //////////////////////////////////////////////////
 
                 if(j.op==="rt_close"){
 
@@ -129,21 +235,146 @@ jobs:
                   return json(res,{
                     ok:true
                   });
+
                 }
 
                 //////////////////////////////////////////////////
-                // BASIC TUNNEL MOCK
+                // REAL TCP TUNNEL
                 //////////////////////////////////////////////////
 
-                if(
-                  j.op==="tunnel" ||
-                  j.op==="batch"
-                ){
-                  return json(res,{
-                    ok:true,
-                    echo:j
+                if(j.op==="tunnel"){
+
+                  //////////////////////////////////////////////////
+                  // VALIDATE
+                  //////////////////////////////////////////////////
+
+                  if(
+                    !j.h ||
+                    !j.p
+                  ){
+
+                    return json(res,{
+                      ok:false,
+                      error:"bad_target"
+                    });
+
+                  }
+
+                  if(!validHost(j.h)){
+
+                    return json(res,{
+                      ok:false,
+                      error:"blocked_host"
+                    });
+
+                  }
+
+                  //////////////////////////////////////////////////
+                  // SOCKET
+                  //////////////////////////////////////////////////
+
+                  const socket =
+                    net.connect(
+                      Number(j.p),
+                      j.h
+                    );
+
+                  socket.setTimeout(15000);
+
+                  const chunks = [];
+
+                  //////////////////////////////////////////////////
+                  // CONNECT
+                  //////////////////////////////////////////////////
+
+                  socket.on("connect",()=>{
+
+                    try{
+
+                      if(j.d){
+
+                        socket.write(
+                          Buffer.from(
+                            j.d,
+                            "base64"
+                          )
+                        );
+
+                      }
+
+                    }catch(e){
+
+                      socket.destroy();
+
+                      return json(res,{
+                        ok:false,
+                        error:String(e)
+                      });
+
+                    }
+
                   });
+
+                  //////////////////////////////////////////////////
+                  // DATA
+                  //////////////////////////////////////////////////
+
+                  socket.on("data",(d)=>{
+
+                    chunks.push(d);
+
+                  });
+
+                  //////////////////////////////////////////////////
+                  // END
+                  //////////////////////////////////////////////////
+
+                  socket.on("end",()=>{
+
+                    const buf =
+                      Buffer.concat(chunks);
+
+                    return json(res,{
+                      ok:true,
+                      d:buf.toString("base64")
+                    });
+
+                  });
+
+                  //////////////////////////////////////////////////
+                  // TIMEOUT
+                  //////////////////////////////////////////////////
+
+                  socket.on("timeout",()=>{
+
+                    socket.destroy();
+
+                    return json(res,{
+                      ok:false,
+                      error:"timeout"
+                    });
+
+                  });
+
+                  //////////////////////////////////////////////////
+                  // ERROR
+                  //////////////////////////////////////////////////
+
+                  socket.on("error",(e)=>{
+
+                    return json(res,{
+                      ok:false,
+                      error:String(e)
+                    });
+
+                  });
+
+                  return;
                 }
+
+                //////////////////////////////////////////////////
+                // UNKNOWN
+                //////////////////////////////////////////////////
 
                 return json(res,{
                   ok:false,
@@ -156,45 +387,62 @@ jobs:
                   ok:false,
                   error:String(err)
                 });
+
               }
 
             });
 
           });
 
+          //////////////////////////////////////////////////////
+          // TIMEOUTS
+          //////////////////////////////////////////////////////
+
           server.keepAliveTimeout = 65000;
           server.headersTimeout = 70000;
 
+          //////////////////////////////////////////////////////
+          // START
+          //////////////////////////////////////////////////////
+
           server.listen(8080,"0.0.0.0",()=>{
 
-            console.log("backend listening :8080");
+            console.log("REAL TCP BACKEND READY");
 
           });
 
           //////////////////////////////////////////////////////
-          // MEMORY CLEANER
+          // SESSION CLEANER
           //////////////////////////////////////////////////////
 
           setInterval(()=>{
 
-            if(global.gc){
-              global.gc();
+            const now = Date.now();
+
+            for(const [sid,s] of sessions){
+
+              if(now - s.ts > 1000 * 60 * 10){
+
+                sessions.delete(sid);
+
+              }
+
             }
 
-          },30000);
+          },60000);
 
           EOF
 
       ########################################################
-      # START SERVER
+      # START BACKEND
       ########################################################
 
       - name: Start backend
         run: |
-          node --expose-gc server.js > backend.log 2>&1 &
+          nohup node server.js > backend.log 2>&1 &
 
       ########################################################
-      # SSH CLIENT
+      # INSTALL SSH
       ########################################################
 
       - name: Install SSH
@@ -218,26 +466,29 @@ jobs:
             nokey@localhost.run \
             > tunnel.log 2>&1 &
 
-          echo "waiting tunnel..."
+          echo "waiting for tunnel..."
 
-          for i in {1..30}; do
+          for i in {1..60}; do
 
             URL=$(grep -Eo 'https://[a-zA-Z0-9.-]+' tunnel.log | head -n 1)
 
             if [ ! -z "$URL" ]; then
+
               echo ""
-              echo "======================================"
+              echo "=================================="
               echo "PUBLIC URL:"
               echo "$URL"
-              echo "======================================"
+              echo "=================================="
               echo ""
 
               echo "$URL" > public_url.txt
 
               break
+
             fi
 
             sleep 2
+
           done
 
           cat tunnel.log
@@ -251,15 +502,15 @@ jobs:
           cat public_url.txt || true
 
       ########################################################
-      # KEEP RUNNER ALIVE
+      # KEEP ALIVE
       ########################################################
 
-      - name: Keep Alive
+      - name: Keep Runner Alive
         run: |
 
           while true; do
 
-            echo "still alive $(date)"
+            echo "alive $(date)"
 
             sleep 60
 

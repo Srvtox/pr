@@ -454,50 +454,70 @@ jobs:
 # START BACKEND
 ########################################################
 
+     
       - name: Start backend
         run: |
+
           nohup node server.js > backend.log 2>&1 &
 
+          echo "waiting backend..."
+
+          for i in {1..30}; do
+
+            if curl -s http://127.0.0.1:8080 > /dev/null; then
+              echo "backend ready ✅"
+              break
+            fi
+
+            sleep 2
+
+          done
+
+          cat backend.log
+
 ########################################################
-# SSH CLIENT
+# INSTALL CLOUDFLARED
 ########################################################
 
-      - name: Install SSH
+      - name: Install cloudflared
         run: |
-          sudo apt update
-          sudo apt install -y openssh-client
+
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+
+          sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared
+
+          sudo chmod +x /usr/local/bin/cloudflared
+
+          cloudflared --version
 
 ########################################################
-# START TUNNEL
+# START CLOUDFLARE TUNNEL
 ########################################################
 
-      - name: Start localhost.run tunnel
+      - name: Start Cloudflare Tunnel
         run: |
 
-          nohup ssh \
-            -o ServerAliveInterval=30 \
-            -o ServerAliveCountMax=3 \
-            -o StrictHostKeyChecking=no \
-            -R 80:localhost:8080 \
-            nokey@localhost.run \
+          nohup cloudflared tunnel \
+            --url http://localhost:8080 \
             > tunnel.log 2>&1 &
 
-          echo "waiting for tunnel..."
+          echo "waiting for cloudflare tunnel..."
 
           for i in {1..60}; do
 
-            URL=$(grep -Eo 'https://[a-zA-Z0-9.-]+' tunnel.log | head -n 1)
+            URL=$(grep -o 'https://[-a-zA-Z0-9]*\.trycloudflare.com' tunnel.log | head -n 1)
 
             if [ ! -z "$URL" ]; then
 
               echo ""
-              echo "==============================="
-              echo "PUBLIC URL:"
+              echo "=================================="
+              echo "CLOUDFLARE PUBLIC URL:"
               echo "$URL"
-              echo "==============================="
+              echo "=================================="
               echo ""
 
               echo "$URL" > public_url.txt
+
               break
 
             fi
@@ -506,7 +526,33 @@ jobs:
 
           done
 
+          echo ""
+          echo "========== TUNNEL LOG =========="
           cat tunnel.log
+
+########################################################
+# TEST PUBLIC ENDPOINT
+########################################################
+
+      - name: Test public endpoint
+        run: |
+
+          URL=$(cat public_url.txt)
+
+          echo "testing: $URL"
+
+          curl -v $URL
+
+########################################################
+# UPLOAD URL
+########################################################
+
+      - name: Upload public URL
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-url
+          path: public_url.txt
+
 
 ########################################################
 # KEEP RUNNER ALIVE

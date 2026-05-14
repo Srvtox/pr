@@ -494,6 +494,10 @@ jobs:
 # START CLOUDFLARE TUNNEL
 ########################################################
 
+      ########################################################
+# START CLOUDFLARE TUNNEL
+########################################################
+
       - name: Start Cloudflare Tunnel
         run: |
 
@@ -503,32 +507,42 @@ jobs:
 
           echo "waiting for cloudflare tunnel..."
 
-          for i in {1..60}; do
+          for i in {1..90}; do
 
-            URL=$(grep -o 'https://[-a-zA-Z0-9]*\.trycloudflare.com' tunnel.log | head -n 1)
+            URL=$(grep -Eo 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' tunnel.log | head -n 1)
 
             if [ ! -z "$URL" ]; then
 
-              echo ""
-              echo "=================================="
-              echo "CLOUDFLARE PUBLIC URL:"
+              echo "found url:"
               echo "$URL"
-              echo "=================================="
-              echo ""
 
-              echo "$URL" > public_url.txt
+              echo "checking dns..."
 
-              break
+              if nslookup $(echo $URL | sed 's|https://||') > /dev/null 2>&1; then
+
+                echo ""
+                echo "=================================="
+                echo "CLOUDFLARE PUBLIC URL:"
+                echo "$URL"
+                echo "=================================="
+                echo ""
+
+                echo "$URL" > public_url.txt
+
+                break
+
+              fi
 
             fi
 
-            sleep 2
+            sleep 3
 
           done
 
           echo ""
           echo "========== TUNNEL LOG =========="
           cat tunnel.log
+
 
 ########################################################
 # TEST PUBLIC ENDPOINT
@@ -541,7 +555,13 @@ jobs:
 
           echo "testing: $URL"
 
-          curl -v $URL
+          sleep 10
+
+          curl --retry 10 \
+               --retry-delay 5 \
+               --retry-all-errors \
+               -v $URL
+
 
 ########################################################
 # UPLOAD URL
